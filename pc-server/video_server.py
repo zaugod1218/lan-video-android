@@ -12,6 +12,9 @@ from pathlib import Path
 from urllib.parse import quote, unquote, urlparse
 
 VIDEO_EXTENSIONS = {".mp4", ".mkv", ".avi", ".mov", ".webm", ".m4v", ".ts", ".flv"}
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".heic", ".heif"}
+PDF_EXTENSIONS = {".pdf"}
+MEDIA_EXTENSIONS = VIDEO_EXTENSIONS | IMAGE_EXTENSIONS | PDF_EXTENSIONS
 
 
 def local_ips():
@@ -29,41 +32,53 @@ class VideoHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         parsed = urlparse(self.path)
-        if parsed.path == "/api/videos":
+        if parsed.path == "/api/media":
             self.send_catalog()
+        elif parsed.path == "/api/videos":
+            self.send_catalog(only_videos=True)
+        elif parsed.path.startswith("/file/"):
+            self.send_media_file(unquote(parsed.path[len("/file/"):]))
         elif parsed.path.startswith("/video/"):
-            self.send_video(unquote(parsed.path[len("/video/"):]))
+            self.send_media_file(unquote(parsed.path[len("/video/"):]), only_video=True)
         elif parsed.path == "/":
             self.send_text("局域网视频服务已启动。请在安卓 App 中填写本机地址。")
         else:
             self.send_error(404)
 
-    def send_catalog(self):
+    def send_catalog(self, only_videos=False):
         root = self.server.video_root
-        videos = []
+        media = []
         for file in root.rglob("*"):
-            if file.is_file() and file.suffix.lower() in VIDEO_EXTENSIONS:
+            suffix = file.suffix.lower()
+            allowed = VIDEO_EXTENSIONS if only_videos else MEDIA_EXTENSIONS
+            if file.is_file() and suffix in allowed:
                 try:
                     relative = file.relative_to(root).as_posix()
                     stat = file.stat()
-                    videos.append({
+                    media_type = (
+                        "video" if suffix in VIDEO_EXTENSIONS
+                        else "image" if suffix in IMAGE_EXTENSIONS
+                        else "pdf"
+                    )
+                    media.append({
                         "name": file.name,
                         "path": relative,
-                        "url": "/video/" + quote(relative, safe="/"),
+                        "url": "/file/" + quote(relative, safe="/"),
+                        "type": media_type,
                         "size": stat.st_size,
                         "modified": int(stat.st_mtime),
                     })
                 except OSError:
                     continue
-        videos.sort(key=lambda item: item["path"].lower())
-        payload = json.dumps(videos, ensure_ascii=False).encode("utf-8")
+        media.sort(key=lambda item: item["path"].lower())
+        payload = json.dumps(media, ensure_ascii=False).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)
 
-    def send_video(self, relative):
+    def send_media_file(self, relative, only_video=False):
         root = self.server.video_root.resolve()
         target = (root / relative).resolve()
         try:
@@ -71,7 +86,8 @@ class VideoHandler(BaseHTTPRequestHandler):
         except ValueError:
             self.send_error(403)
             return
-        if not target.is_file() or target.suffix.lower() not in VIDEO_EXTENSIONS:
+        allowed = VIDEO_EXTENSIONS if only_video else MEDIA_EXTENSIONS
+        if not target.is_file() or target.suffix.lower() not in allowed:
             self.send_error(404)
             return
 
