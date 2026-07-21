@@ -5,6 +5,7 @@ import android.graphics.BitmapFactory
 import android.graphics.Color as AndroidColor
 import android.graphics.pdf.PdfRenderer
 import android.media.MediaMetadataRetriever
+import android.content.pm.ActivityInfo
 import android.os.Build
 import android.os.Bundle
 import android.os.ParcelFileDescriptor
@@ -34,6 +35,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.lifecycleScope
 import androidx.media3.common.MediaItem
 import androidx.media3.exoplayer.ExoPlayer
@@ -256,6 +260,10 @@ class MainActivity : ComponentActivity() {
 
     @Composable
     private fun ViewerScreen(item: LibraryItem, base: String, onBack: () -> Unit) {
+        if (item.type == LibraryType.VIDEO) {
+            VideoViewer(absoluteUrl(base, item.url), onBack)
+            return
+        }
         Scaffold(
             topBar = {
                 TopAppBar(
@@ -266,7 +274,7 @@ class MainActivity : ComponentActivity() {
         ) { padding ->
             Box(Modifier.fillMaxSize().padding(padding)) {
                 when (item.type) {
-                    LibraryType.VIDEO -> VideoViewer(absoluteUrl(base, item.url))
+                    LibraryType.VIDEO -> Unit
                     LibraryType.IMAGE -> ImageViewer(item, absoluteUrl(base, item.url))
                     LibraryType.PDF -> PdfViewer(item, absoluteUrl(base, item.url))
                 }
@@ -275,8 +283,9 @@ class MainActivity : ComponentActivity() {
     }
 
     @Composable
-    private fun VideoViewer(url: String) {
+    private fun VideoViewer(url: String, onBack: () -> Unit) {
         val context = LocalContext.current
+        val activity = this@MainActivity
         val player = remember(url) {
             ExoPlayer.Builder(context).build().apply {
                 setMediaItem(MediaItem.fromUri(url))
@@ -284,8 +293,41 @@ class MainActivity : ComponentActivity() {
                 playWhenReady = true
             }
         }
-        DisposableEffect(player) { onDispose { player.release() } }
-        AndroidView(factory = { PlayerView(it).apply { this.player = player } }, modifier = Modifier.fillMaxSize())
+        DisposableEffect(player) {
+            activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+            WindowCompat.setDecorFitsSystemWindows(activity.window, false)
+            WindowInsetsControllerCompat(activity.window, activity.window.decorView).apply {
+                hide(WindowInsetsCompat.Type.systemBars())
+                systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            }
+            onDispose {
+                player.release()
+                activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+                WindowCompat.setDecorFitsSystemWindows(activity.window, true)
+                WindowInsetsControllerCompat(activity.window, activity.window.decorView)
+                    .show(WindowInsetsCompat.Type.systemBars())
+            }
+        }
+        Box(Modifier.fillMaxSize().background(Color.Black)) {
+            AndroidView(
+                factory = {
+                    PlayerView(it).apply {
+                        this.player = player
+                        useController = true
+                        controllerAutoShow = true
+                    }
+                },
+                modifier = Modifier.fillMaxSize(),
+            )
+            TextButton(
+                onClick = onBack,
+                modifier = Modifier.align(Alignment.TopStart).padding(12.dp),
+                colors = ButtonDefaults.textButtonColors(
+                    containerColor = Color(0x99000000),
+                    contentColor = Color.White,
+                ),
+            ) { Text("← 返回") }
+        }
     }
 
     @Composable
