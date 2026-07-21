@@ -38,6 +38,7 @@ class MainActivity : ComponentActivity() {
         setContent { MaterialTheme(colorScheme = lightColorScheme(primary = Color(0xFF4F46E5))) { VideoApp() } }
     }
 
+    @OptIn(ExperimentalMaterial3Api::class)
     @Composable
     private fun VideoApp() {
         val prefs = remember { getSharedPreferences("connection", MODE_PRIVATE) }
