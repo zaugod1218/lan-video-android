@@ -15,6 +15,8 @@ import androidx.activity.compose.setContent
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -43,9 +45,11 @@ import androidx.media3.common.MediaItem
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
+import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
 import java.net.HttpURLConnection
@@ -69,6 +73,13 @@ data class LibraryItem(
     val url: String,
     val size: Long,
     val type: LibraryType,
+)
+
+data class PlaybackRecord(
+    val item: LibraryItem,
+    val positionMs: Long,
+    val durationMs: Long,
+    val playedAt: Long,
 )
 
 data class PreviewResult(val bitmap: Bitmap? = null, val complete: Boolean = false)
@@ -95,6 +106,8 @@ class MainActivity : ComponentActivity() {
         var address by remember { mutableStateOf(prefs.getString("address", "http://192.168.1.16:8787")!!) }
         var media by remember { mutableStateOf(emptyList<LibraryItem>()) }
         var selectedType by remember { mutableStateOf<LibraryType?>(null) }
+        var showHistory by remember { mutableStateOf(false) }
+        var history by remember { mutableStateOf(loadHistory(prefs)) }
         var loading by remember { mutableStateOf(false) }
         var error by remember { mutableStateOf<String?>(null) }
         var viewing by remember { mutableStateOf<LibraryItem?>(null) }
@@ -114,12 +127,23 @@ class MainActivity : ComponentActivity() {
 
         viewing?.let { item ->
             BackHandler { viewing = null }
-            ViewerScreen(item, normalizeAddress(address)) { viewing = null }
+            val record = history.firstOrNull { it.item.path == item.path }
+            ViewerScreen(
+                item = item,
+                base = normalizeAddress(address),
+                initialPositionMs = record?.positionMs ?: 0L,
+                onProgress = { position, duration ->
+                    history = updateHistory(history, item, position, duration)
+                    saveHistory(prefs, history)
+                },
+                onBack = { viewing = null },
+            )
             return
         }
 
-        val visibleMedia = remember(media, selectedType) {
-            selectedType?.let { type -> media.filter { it.type == type } } ?: media
+        val visibleMedia = remember(media, selectedType, showHistory, history) {
+            if (showHistory) history.map { it.item }
+            else selectedType?.let { type -> media.filter { it.type == type } } ?: media
         }
 
         Scaffold(
@@ -139,7 +163,10 @@ class MainActivity : ComponentActivity() {
                 Modifier.fillMaxSize().padding(padding).background(Color(0xFFF8F9FF)).padding(horizontal = 14.dp)
             ) {
                 ConnectionCard(address, { address = it }, loading, ::connect)
-                FilterRow(selectedType) { selectedType = it }
+                FilterRow(selectedType, showHistory) { type, records ->
+                    selectedType = type
+                    showHistory = records
+                }
                 error?.let {
                     Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(vertical = 6.dp))
                 }
@@ -147,7 +174,7 @@ class MainActivity : ComponentActivity() {
                     loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         CircularProgressIndicator()
                     }
-                    visibleMedia.isEmpty() -> EmptyLibrary(error == null && media.isEmpty())
+                    visibleMedia.isEmpty() -> if (showHistory) EmptyHistory() else EmptyLibrary(error == null && media.isEmpty())
                     else -> LazyVerticalGrid(
                         columns = GridCells.Adaptive(154.dp),
                         modifier = Modifier.fillMaxSize(),
@@ -156,7 +183,11 @@ class MainActivity : ComponentActivity() {
                         verticalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
                         gridItems(visibleMedia, key = { it.path }) { item ->
-                            MediaCard(item, normalizeAddress(address)) { viewing = item }
+                            MediaCard(
+                                item,
+                                normalizeAddress(address),
+                                history.firstOrNull { it.item.path == item.path },
+                            ) { viewing = item }
                         }
                     }
                 }
@@ -188,11 +219,26 @@ class MainActivity : ComponentActivity() {
     }
 
     @Composable
-    private fun FilterRow(selected: LibraryType?, onSelect: (LibraryType?) -> Unit) {
-        Row(Modifier.fillMaxWidth().padding(bottom = 10.dp), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-            FilterChip(selected = selected == null, onClick = { onSelect(null) }, label = { Text("全部") })
+    private fun FilterRow(selected: LibraryType?, showHistory: Boolean, onSelect: (LibraryType?, Boolean) -> Unit) {
+        Row(
+            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(bottom = 10.dp),
+            horizontalArrangement = Arrangement.spacedBy(7.dp),
+        ) {
+            FilterChip(selected = selected == null && !showHistory, onClick = { onSelect(null, false) }, label = { Text("全部") })
             LibraryType.entries.forEach { type ->
-                FilterChip(selected = selected == type, onClick = { onSelect(type) }, label = { Text(type.label) })
+                FilterChip(selected = selected == type && !showHistory, onClick = { onSelect(type, false) }, label = { Text(type.label) })
+            }
+            FilterChip(selected = showHistory, onClick = { onSelect(null, true) }, label = { Text("播放记录") })
+        }
+    }
+
+    @Composable
+    private fun EmptyHistory() {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text("◷", style = MaterialTheme.typography.displayMedium, color = Color(0xFF9CA3AF))
+                Text("还没有播放记录", fontWeight = FontWeight.SemiBold)
+                Text("播放视频后会自动保存在这里", color = Color.Gray)
             }
         }
     }
@@ -209,7 +255,7 @@ class MainActivity : ComponentActivity() {
     }
 
     @Composable
-    private fun MediaCard(item: LibraryItem, base: String, onClick: () -> Unit) {
+    private fun MediaCard(item: LibraryItem, base: String, record: PlaybackRecord?, onClick: () -> Unit) {
         Card(
             modifier = Modifier.fillMaxWidth().clickable(onClick = onClick),
             colors = CardDefaults.cardColors(containerColor = Color.White),
@@ -229,6 +275,19 @@ class MainActivity : ComponentActivity() {
                 Text(item.name, maxLines = 2, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.height(3.dp))
                 Text(formatSize(item.size), color = Color.Gray, style = MaterialTheme.typography.labelMedium)
+                if (item.type == LibraryType.VIDEO && record != null && record.positionMs > 0) {
+                    Spacer(Modifier.height(7.dp))
+                    LinearProgressIndicator(
+                        progress = { playbackFraction(record.positionMs, record.durationMs) },
+                        modifier = Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(2.dp)),
+                    )
+                    Text(
+                        "上次看到 ${formatDuration(record.positionMs)}",
+                        color = MaterialTheme.colorScheme.primary,
+                        style = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier.padding(top = 4.dp),
+                    )
+                }
             }
         }
     }
@@ -259,9 +318,15 @@ class MainActivity : ComponentActivity() {
     }
 
     @Composable
-    private fun ViewerScreen(item: LibraryItem, base: String, onBack: () -> Unit) {
+    private fun ViewerScreen(
+        item: LibraryItem,
+        base: String,
+        initialPositionMs: Long,
+        onProgress: (Long, Long) -> Unit,
+        onBack: () -> Unit,
+    ) {
         if (item.type == LibraryType.VIDEO) {
-            VideoViewer(absoluteUrl(base, item.url), onBack)
+            VideoViewer(absoluteUrl(base, item.url), initialPositionMs, onProgress, onBack)
             return
         }
         Scaffold(
@@ -283,14 +348,26 @@ class MainActivity : ComponentActivity() {
     }
 
     @Composable
-    private fun VideoViewer(url: String, onBack: () -> Unit) {
+    private fun VideoViewer(
+        url: String,
+        initialPositionMs: Long,
+        onProgress: (Long, Long) -> Unit,
+        onBack: () -> Unit,
+    ) {
         val context = LocalContext.current
         val activity = this@MainActivity
         val player = remember(url) {
             ExoPlayer.Builder(context).build().apply {
                 setMediaItem(MediaItem.fromUri(url))
                 prepare()
+                if (initialPositionMs > 0) seekTo(initialPositionMs)
                 playWhenReady = true
+            }
+        }
+        LaunchedEffect(player) {
+            while (true) {
+                delay(3_000)
+                onProgress(player.currentPosition.coerceAtLeast(0L), player.duration.coerceAtLeast(0L))
             }
         }
         DisposableEffect(player) {
@@ -301,6 +378,7 @@ class MainActivity : ComponentActivity() {
                 systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
             }
             onDispose {
+                onProgress(player.currentPosition.coerceAtLeast(0L), player.duration.coerceAtLeast(0L))
                 player.release()
                 activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
                 WindowCompat.setDecorFitsSystemWindows(activity.window, true)
@@ -475,4 +553,65 @@ class MainActivity : ComponentActivity() {
         bytes >= 1_048_576 -> "%.1f MB".format(bytes / 1_048_576.0)
         else -> "%.1f KB".format(bytes / 1024.0)
     }
+
+    private fun playbackFraction(positionMs: Long, durationMs: Long): Float {
+        if (durationMs <= 0) return 0f
+        return (positionMs.toFloat() / durationMs).coerceIn(0f, 1f)
+    }
+
+    private fun formatDuration(milliseconds: Long): String {
+        val totalSeconds = milliseconds.coerceAtLeast(0L) / 1000
+        val hours = totalSeconds / 3600
+        val minutes = (totalSeconds % 3600) / 60
+        val seconds = totalSeconds % 60
+        return if (hours > 0) "%d:%02d:%02d".format(hours, minutes, seconds)
+        else "%02d:%02d".format(minutes, seconds)
+    }
+
+    private fun updateHistory(
+        current: List<PlaybackRecord>,
+        item: LibraryItem,
+        positionMs: Long,
+        durationMs: Long,
+    ): List<PlaybackRecord> {
+        val safePosition = if (durationMs > 0 && positionMs >= durationMs - 5_000) 0L else positionMs
+        val updated = PlaybackRecord(item, safePosition, durationMs, System.currentTimeMillis())
+        return (listOf(updated) + current.filterNot { it.item.path == item.path }).take(100)
+    }
+
+    private fun saveHistory(prefs: android.content.SharedPreferences, history: List<PlaybackRecord>) {
+        val array = JSONArray()
+        history.forEach { record ->
+            array.put(JSONObject().apply {
+                put("name", record.item.name)
+                put("path", record.item.path)
+                put("url", record.item.url)
+                put("size", record.item.size)
+                put("position", record.positionMs)
+                put("duration", record.durationMs)
+                put("playedAt", record.playedAt)
+            })
+        }
+        prefs.edit().putString("playback_history", array.toString()).apply()
+    }
+
+    private fun loadHistory(prefs: android.content.SharedPreferences): List<PlaybackRecord> = runCatching {
+        val array = JSONArray(prefs.getString("playback_history", "[]"))
+        (0 until array.length()).map { index ->
+            array.getJSONObject(index).let { obj ->
+                PlaybackRecord(
+                    item = LibraryItem(
+                        name = obj.getString("name"),
+                        path = obj.getString("path"),
+                        url = obj.getString("url"),
+                        size = obj.optLong("size", 0L),
+                        type = LibraryType.VIDEO,
+                    ),
+                    positionMs = obj.optLong("position", 0L),
+                    durationMs = obj.optLong("duration", 0L),
+                    playedAt = obj.optLong("playedAt", 0L),
+                )
+            }
+        }.sortedByDescending { it.playedAt }
+    }.getOrDefault(emptyList())
 }
