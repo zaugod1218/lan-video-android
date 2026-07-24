@@ -6,7 +6,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from lan_torrent_server import Library, Server
+from lan_torrent_server import Library, Server, Video
 
 
 def bencode(value):
@@ -94,6 +94,21 @@ class ServerTest(unittest.TestCase):
             urllib.request.urlopen(request, timeout=2)
         self.assertEqual(error.exception.code, 401)
         error.exception.close()
+
+    def test_torrent_only_video_is_streamable_when_engine_is_online(self):
+        video = Video(
+            id="demo",
+            name="clip.mp4",
+            torrent="Demo",
+            path=None,
+            size=100,
+            mime="video/mp4",
+            torrent_hash="0" * 40,
+            torrent_path="clip.mp4",
+        )
+        payload = video.public(engine_online=True)
+        self.assertTrue(payload["available"])
+        self.assertEqual(payload["stream_url"], "/stream/demo")
 
 
 if __name__ == "__main__":

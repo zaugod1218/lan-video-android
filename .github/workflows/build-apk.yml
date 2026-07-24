@@ -22,6 +22,19 @@ jobs:
           distribution: temurin
           java-version: "17"
 
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache: false
+
+      - name: Build Windows BitTorrent streaming engine
+        shell: bash
+        run: |
+          GOOS=windows GOARCH=amd64 go install github.com/anacrolix/confluence@v1.16.0
+          cp "$(go env GOPATH)/bin/windows_amd64/confluence.exe" \
+            pc-server/lan-torrent-engine.exe
+
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
@@ -40,5 +53,18 @@ jobs:
         with:
           name: LanTorrentVideo-debug-apk
           path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload Windows PC server
+        uses: actions/upload-artifact@v4
+        with:
+          name: LanTorrentVideo-pc-server-windows
+          path: |
+            pc-server/lan-torrent-engine.exe
+            pc-server/lan_torrent_server.py
+            pc-server/one-click-server.ps1
+            pc-server/一键启动服务.bat
+            pc-server/requirements.txt
           if-no-files-found: error
           retention-days: 30

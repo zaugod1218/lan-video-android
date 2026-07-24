@@ -16,6 +16,8 @@ import mimetypes
 import os
 import re
 import socket
+import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -23,7 +25,9 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.error import HTTPError, URLError
+from urllib.parse import unquote, urlencode, urlparse
+from urllib.request import Request, urlopen
 
 VIDEO_EXTENSIONS = {
     ".mp4", ".mkv", ".webm", ".avi", ".mov", ".m4v", ".ts", ".m2ts",
@@ -88,6 +92,20 @@ def bdecode(data: bytes) -> Any:
     return value
 
 
+def bencode(value: Any) -> bytes:
+    if isinstance(value, int):
+        return b"i" + str(value).encode("ascii") + b"e"
+    if isinstance(value, bytes):
+        return str(len(value)).encode("ascii") + b":" + value
+    if isinstance(value, list):
+        return b"l" + b"".join(bencode(item) for item in value) + b"e"
+    if isinstance(value, dict):
+        return b"d" + b"".join(
+            bencode(key) + bencode(value[key]) for key in sorted(value)
+        ) + b"e"
+    raise BencodeError(f"cannot encode {type(value).__name__}")
+
+
 def text(value: bytes | None) -> str:
     return (value or b"").decode("utf-8", errors="replace")
 
@@ -100,22 +118,116 @@ class Video:
     path: Path | None
     size: int
     mime: str
+    torrent_hash: str | None = None
+    torrent_path: str | None = None
 
-    def public(self) -> dict[str, Any]:
+    def public(self, engine_online: bool) -> dict[str, Any]:
+        streamable = self.path is not None or (
+            engine_online and self.torrent_hash is not None and self.torrent_path is not None
+        )
         return {
             "id": self.id,
             "name": self.name,
             "torrent": self.torrent,
             "size": self.size,
             "mime": self.mime,
-            "available": self.path is not None,
-            "stream_url": f"/stream/{self.id}" if self.path is not None else None,
+            "available": streamable,
+            "stream_url": f"/stream/{self.id}" if streamable else None,
         }
 
 
+class TorrentEngine:
+    def __init__(self, executable: Path, data_dir: Path, port: int = 8790):
+        self.executable = executable
+        self.data_dir = data_dir
+        self.port = port
+        self.base_url = f"http://127.0.0.1:{port}"
+        self.process: subprocess.Popen | None = None
+        self.log_file = None
+        self.online = False
+
+    def start(self) -> bool:
+        if not self.executable.is_file():
+            print(f"按需下载引擎未找到: {self.executable}")
+            return False
+        log_path = self.executable.parent / "torrent-engine.log"
+        self.log_file = log_path.open("ab")
+        flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+        self.process = subprocess.Popen(
+            [
+                str(self.executable),
+                "-addr", f"127.0.0.1:{self.port}",
+                "-fileDir", str(self.data_dir),
+                "-seed",
+                "-unlimitedCache",
+                "-torrentGrace", "24h",
+            ],
+            cwd=self.executable.parent,
+            stdout=self.log_file,
+            stderr=subprocess.STDOUT,
+            creationflags=flags,
+        )
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            if self.process.poll() is not None:
+                break
+            try:
+                with urlopen(f"{self.base_url}/status", timeout=1):
+                    self.online = True
+                    print("按需 BitTorrent 流媒体引擎: 已启动")
+                    return True
+            except (OSError, URLError):
+                time.sleep(0.4)
+        print(f"按需下载引擎启动失败，请查看 {log_path}")
+        self.stop()
+        return False
+
+    def stop(self) -> None:
+        self.online = False
+        if self.process and self.process.poll() is None:
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+        if self.log_file:
+            self.log_file.close()
+            self.log_file = None
+
+    def register(self, torrent_file: Path) -> bool:
+        if not self.online:
+            return False
+        try:
+            request = Request(
+                f"{self.base_url}/metainfo",
+                data=torrent_file.read_bytes(),
+                method="POST",
+                headers={"Content-Type": "application/x-bittorrent"},
+            )
+            with urlopen(request, timeout=10) as response:
+                response.read()
+            return True
+        except (OSError, HTTPError, URLError) as error:
+            print(f"加载种子失败 {torrent_file.name}: {error}")
+            return False
+
+    def open_stream(self, video: Video, method: str, range_header: str | None):
+        query = urlencode({"ih": video.torrent_hash, "path": video.torrent_path})
+        headers = {}
+        if range_header:
+            headers["Range"] = range_header
+        request = Request(
+            f"{self.base_url}/data?{query}",
+            method=method,
+            headers=headers,
+        )
+        return urlopen(request, timeout=300)
+
+
 class Library:
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, engine: TorrentEngine | None = None):
         self.root = root.resolve()
+        self.engine = engine
         self._lock = threading.Lock()
         self._videos: dict[str, Video] = {}
         self._last_scan = 0.0
@@ -132,20 +244,26 @@ class Library:
             return self._videos.get(video_id)
 
     def scan(self) -> None:
-        grouped_paths: dict[str, tuple[str, int, Path]] = {}
+        grouped_paths: dict[str, tuple[str, int, Path, str, str]] = {}
         for torrent_file in self.root.rglob("*.torrent"):
             try:
                 metadata = bdecode(torrent_file.read_bytes())
                 info = metadata[b"info"]
+                info_hash = hashlib.sha1(bencode(info)).hexdigest()
                 torrent_name = text(info.get(b"name.utf-8") or info.get(b"name")) or torrent_file.stem
+                if self.engine:
+                    self.engine.register(torrent_file)
                 if b"files" in info:
                     for entry in info[b"files"]:
                         parts = entry.get(b"path.utf-8") or entry.get(b"path") or []
                         relative = Path(torrent_name, *(text(part) for part in parts))
+                        display_path = "/".join(text(part) for part in parts)
                         grouped_paths[relative.as_posix().casefold()] = (
                             torrent_name,
                             int(entry.get(b"length", 0)),
                             relative,
+                            info_hash,
+                            display_path,
                         )
                 else:
                     name = text(info.get(b"name.utf-8") or info.get(b"name"))
@@ -153,12 +271,20 @@ class Library:
                         torrent_name,
                         int(info.get(b"length", 0)),
                         Path(name),
+                        info_hash,
+                        name,
                     )
             except (OSError, KeyError, TypeError, ValueError, BencodeError):
                 continue
 
         found: dict[str, Video] = {}
-        for _, (torrent_name, declared_size, relative) in grouped_paths.items():
+        for _, (
+            torrent_name,
+            declared_size,
+            relative,
+            info_hash,
+            display_path,
+        ) in grouped_paths.items():
             if relative.suffix.casefold() not in VIDEO_EXTENSIONS:
                 continue
             digest = hashlib.sha256(relative.as_posix().encode("utf-8")).hexdigest()[:24]
@@ -179,6 +305,8 @@ class Library:
                 available_path,
                 actual_size,
                 mime,
+                info_hash,
+                display_path,
             )
 
         for path in self.root.rglob("*"):
@@ -199,11 +327,14 @@ class Library:
             self._last_scan = time.monotonic()
 
     @staticmethod
-    def _match_group(relative: str, groups: dict[str, tuple[str, int, Path]]) -> str:
+    def _match_group(
+        relative: str,
+        groups: dict[str, tuple[str, int, Path, str, str]],
+    ) -> str:
         folded = Path(relative).as_posix().casefold()
         if folded in groups:
             return groups[folded][0]
-        for torrent_path, (name, _, _) in groups.items():
+        for torrent_path, (name, _, _, _, _) in groups.items():
             if folded.endswith("/" + torrent_path) or torrent_path.endswith("/" + folded):
                 return name
         parts = Path(relative).parts
@@ -213,11 +344,19 @@ class Library:
 class Server(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, address: tuple[str, int], library: Library, token: str, allow_public: bool):
+    def __init__(
+        self,
+        address: tuple[str, int],
+        library: Library,
+        token: str,
+        allow_public: bool,
+        engine: TorrentEngine | None = None,
+    ):
         super().__init__(address, Handler)
         self.library = library
         self.token = token
         self.allow_public = allow_public
+        self.engine = engine
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -233,9 +372,14 @@ class Handler(BaseHTTPRequestHandler):
             return
         path = unquote(urlparse(self.path).path)
         if path == "/api/health":
-            self._json({"ok": True, "name": "LAN Torrent Video"})
+            self._json({
+                "ok": True,
+                "name": "LAN Torrent Video",
+                "torrent_streaming": bool(self.server.engine and self.server.engine.online),
+            })
         elif path == "/api/videos":
-            self._json([item.public() for item in self.server.library.videos()])
+            engine_online = bool(self.server.engine and self.server.engine.online)
+            self._json([item.public(engine_online) for item in self.server.library.videos()])
         elif path.startswith("/stream/"):
             self._stream(path.removeprefix("/stream/"))
         else:
@@ -272,8 +416,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def _stream(self, video_id: str, head_only: bool = False) -> None:
         video = self.server.library.get(video_id)
-        if video is None or video.path is None:
+        if video is None:
             self.send_error(HTTPStatus.NOT_FOUND)
+            return
+        if video.path is None:
+            self._torrent_stream(video, head_only)
             return
         size = video.size
         start, end = 0, size - 1
@@ -321,6 +468,52 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             pass
 
+    def _torrent_stream(self, video: Video, head_only: bool) -> None:
+        engine = self.server.engine
+        if (
+            engine is None
+            or not engine.online
+            or video.torrent_hash is None
+            or video.torrent_path is None
+        ):
+            self.send_error(HTTPStatus.SERVICE_UNAVAILABLE, "BitTorrent engine unavailable")
+            return
+        try:
+            upstream = engine.open_stream(
+                video,
+                "HEAD" if head_only else "GET",
+                self.headers.get("Range"),
+            )
+        except HTTPError as error:
+            self.send_response(error.code)
+            for name in ("Content-Type", "Content-Range", "Content-Length", "Accept-Ranges"):
+                value = error.headers.get(name)
+                if value:
+                    self.send_header(name, value)
+            self.end_headers()
+            return
+        except (OSError, URLError):
+            self.send_error(HTTPStatus.GATEWAY_TIMEOUT, "Waiting for torrent data failed")
+            return
+        with upstream:
+            self.send_response(upstream.status)
+            for name in ("Content-Type", "Content-Range", "Content-Length", "Accept-Ranges"):
+                value = upstream.headers.get(name)
+                if value:
+                    self.send_header(name, value)
+            self.send_header("X-Content-Source", "bittorrent")
+            self.end_headers()
+            if head_only:
+                return
+            try:
+                while True:
+                    chunk = upstream.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
 
 def advertise(port: int):
     try:
@@ -354,12 +547,22 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8787)
     parser.add_argument("--token", default=os.environ.get("LAN_TORRENT_TOKEN", ""))
     parser.add_argument("--allow-public", action="store_true", help="Allow non-private client IPs")
+    parser.add_argument(
+        "--torrent-engine",
+        type=Path,
+        default=Path(__file__).with_name("lan-torrent-engine.exe"),
+        help="Path to the bundled on-demand BitTorrent engine",
+    )
+    parser.add_argument("--torrent-engine-port", type=int, default=8790)
     args = parser.parse_args()
     if not args.root.is_dir():
         parser.error(f"directory does not exist: {args.root}")
-    library = Library(args.root)
+    engine = TorrentEngine(args.torrent_engine.resolve(), args.root.resolve(), args.torrent_engine_port)
+    if not engine.start():
+        engine = None
+    library = Library(args.root, engine)
     library.scan()
-    server = Server((args.host, args.port), library, args.token, args.allow_public)
+    server = Server((args.host, args.port), library, args.token, args.allow_public, engine)
     ad = advertise(args.port)
     print(f"共享目录: {library.root}")
     print(f"发现视频: {len(library.videos())}")
@@ -371,6 +574,8 @@ def main() -> None:
         pass
     finally:
         server.server_close()
+        if engine:
+            engine.stop()
         if ad:
             zeroconf, service = ad
             zeroconf.unregister_service(service)

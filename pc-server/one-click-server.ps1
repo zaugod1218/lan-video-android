@@ -4,6 +4,7 @@ $Host.UI.RawUI.WindowTitle = "局域网种子影院 - 电脑服务"
 $configPath = Join-Path $PSScriptRoot "server-config.json"
 $serverPath = Join-Path $PSScriptRoot "lan_torrent_server.py"
 $requirementsPath = Join-Path $PSScriptRoot "requirements.txt"
+$enginePath = Join-Path $PSScriptRoot "lan-torrent-engine.exe"
 
 function Find-Python {
     foreach ($command in @("python", "py")) {
@@ -110,6 +111,12 @@ Write-Host ""
 Write-Host "============================================" -ForegroundColor DarkCyan
 Write-Host "  局域网种子影院电脑服务" -ForegroundColor Green
 Write-Host "  共享目录：$($config.mediaDirectory)"
+if (Test-Path -LiteralPath $enginePath) {
+    Write-Host "  Torrent 在线播放：已启用" -ForegroundColor Green
+} else {
+    Write-Host "  Torrent 在线播放：未安装下载引擎" -ForegroundColor Yellow
+    Write-Host "  请下载完整电脑服务包，确保 lan-torrent-engine.exe 位于本目录。" -ForegroundColor Yellow
+}
 if ($localIp) {
     Write-Host "  手机地址：http://${localIp}:$($config.port)" -ForegroundColor Yellow
 } else {
