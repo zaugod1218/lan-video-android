@@ -29,7 +29,11 @@ jobs:
         run: chmod +x gradlew
 
       - name: Build debug APK
-        run: ./gradlew :app:assembleDebug --no-daemon --stacktrace
+        env:
+          GRADLE_OPTS: >-
+            -Dorg.gradle.jvmargs=-Xmx2g
+            -Dfile.encoding=UTF-8
+        run: ./gradlew :app:assembleDebug --no-daemon --stacktrace --console=plain
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
