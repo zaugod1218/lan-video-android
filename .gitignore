@@ -1,0 +1,10 @@
+.gradle/
+.gradle-user/
+.idea/
+local.properties
+**/build/
+*.apk
+*.aab
+hs_err_pid*.log
+__pycache__/
+*.pyc
