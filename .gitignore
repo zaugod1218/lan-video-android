@@ -8,3 +8,4 @@ local.properties
 hs_err_pid*.log
 __pycache__/
 *.pyc
+pc-server/server-config.json

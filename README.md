@@ -10,6 +10,17 @@
 
 需要 Python 3.10+。自动发现是可选功能：
 
+最简单的方法是双击：
+
+```text
+pc-server\一键启动服务.bat
+```
+
+首次启动会弹出窗口选择 `.torrent` 和视频所在目录，并把选择保存到
+`pc-server\server-config.json`。以后只需再次双击即可。
+
+也可以使用命令行：
+
 ```powershell
 cd pc-server
 python -m pip install -r requirements.txt
