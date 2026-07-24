@@ -156,11 +156,11 @@ class TorrentEngine:
         self.process = subprocess.Popen(
             [
                 str(self.executable),
-                "-addr", f"127.0.0.1:{self.port}",
-                "-fileDir", str(self.data_dir),
+                f"-addr=127.0.0.1:{self.port}",
+                f"-fileDir={self.data_dir}",
                 "-seed",
                 "-unlimitedCache",
-                "-torrentGrace", "24h",
+                "-torrentGrace=24h",
             ],
             cwd=self.executable.parent,
             stdout=self.log_file,
