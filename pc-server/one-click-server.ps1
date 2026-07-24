@@ -26,6 +26,26 @@ function Select-MediaDirectory {
     return $dialog.SelectedPath
 }
 
+function Confirm-MediaDirectory([string]$CurrentDirectory) {
+    Add-Type -AssemblyName System.Windows.Forms
+    $message = @"
+当前绑定文件夹：
+$CurrentDirectory
+
+是否需要更换绑定文件夹？
+
+“是”＝选择新文件夹
+“否”＝继续使用当前文件夹
+“取消”＝退出
+"@
+    return [System.Windows.Forms.MessageBox]::Show(
+        $message,
+        "局域网种子影院",
+        [System.Windows.Forms.MessageBoxButtons]::YesNoCancel,
+        [System.Windows.Forms.MessageBoxIcon]::Question
+    )
+}
+
 function Get-LocalIPv4 {
     $addresses = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
         Where-Object {
@@ -57,6 +77,17 @@ if (-not $config -or -not $config.mediaDirectory -or
     }
     $config | ConvertTo-Json | Set-Content -LiteralPath $configPath -Encoding UTF8
     Write-Host "配置已保存到 $configPath" -ForegroundColor Green
+} else {
+    $choice = Confirm-MediaDirectory -CurrentDirectory $config.mediaDirectory
+    if ($choice -eq [System.Windows.Forms.DialogResult]::Cancel) {
+        Write-Host "已取消启动。"
+        exit 0
+    }
+    if ($choice -eq [System.Windows.Forms.DialogResult]::Yes) {
+        $config.mediaDirectory = Select-MediaDirectory
+        $config | ConvertTo-Json | Set-Content -LiteralPath $configPath -Encoding UTF8
+        Write-Host "绑定文件夹已更换为：$($config.mediaDirectory)" -ForegroundColor Green
+    }
 }
 
 if (-not $config.port) {

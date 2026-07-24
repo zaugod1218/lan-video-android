@@ -17,7 +17,8 @@ pc-server\一键启动服务.bat
 ```
 
 首次启动会弹出窗口选择 `.torrent` 和视频所在目录，并把选择保存到
-`pc-server\server-config.json`。以后只需再次双击即可。
+`pc-server\server-config.json`。以后每次启动都会显示当前绑定目录，可选择继续使用、
+更换目录或取消启动。
 
 也可以使用命令行：
 
