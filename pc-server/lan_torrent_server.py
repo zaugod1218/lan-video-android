@@ -97,7 +97,7 @@ class Video:
     id: str
     name: str
     torrent: str
-    path: Path
+    path: Path | None
     size: int
     mime: str
 
@@ -108,7 +108,8 @@ class Video:
             "torrent": self.torrent,
             "size": self.size,
             "mime": self.mime,
-            "stream_url": f"/stream/{self.id}",
+            "available": self.path is not None,
+            "stream_url": f"/stream/{self.id}" if self.path is not None else None,
         }
 
 
@@ -131,7 +132,7 @@ class Library:
             return self._videos.get(video_id)
 
     def scan(self) -> None:
-        grouped_paths: dict[str, str] = {}
+        grouped_paths: dict[str, tuple[str, int, Path]] = {}
         for torrent_file in self.root.rglob("*.torrent"):
             try:
                 metadata = bdecode(torrent_file.read_bytes())
@@ -141,14 +142,45 @@ class Library:
                     for entry in info[b"files"]:
                         parts = entry.get(b"path.utf-8") or entry.get(b"path") or []
                         relative = Path(torrent_name, *(text(part) for part in parts))
-                        grouped_paths[relative.as_posix().casefold()] = torrent_name
+                        grouped_paths[relative.as_posix().casefold()] = (
+                            torrent_name,
+                            int(entry.get(b"length", 0)),
+                            relative,
+                        )
                 else:
                     name = text(info.get(b"name.utf-8") or info.get(b"name"))
-                    grouped_paths[Path(name).as_posix().casefold()] = torrent_name
+                    grouped_paths[Path(name).as_posix().casefold()] = (
+                        torrent_name,
+                        int(info.get(b"length", 0)),
+                        Path(name),
+                    )
             except (OSError, KeyError, TypeError, ValueError, BencodeError):
                 continue
 
         found: dict[str, Video] = {}
+        for _, (torrent_name, declared_size, relative) in grouped_paths.items():
+            if relative.suffix.casefold() not in VIDEO_EXTENSIONS:
+                continue
+            digest = hashlib.sha256(relative.as_posix().encode("utf-8")).hexdigest()[:24]
+            candidate = (self.root / relative).resolve()
+            available_path = None
+            try:
+                candidate.relative_to(self.root)
+                if candidate.is_file():
+                    available_path = candidate
+            except (OSError, ValueError):
+                pass
+            actual_size = available_path.stat().st_size if available_path else declared_size
+            mime = mimetypes.guess_type(relative.name)[0] or "application/octet-stream"
+            found[digest] = Video(
+                digest,
+                relative.name,
+                torrent_name,
+                available_path,
+                actual_size,
+                mime,
+            )
+
         for path in self.root.rglob("*"):
             try:
                 if not path.is_file() or path.suffix.casefold() not in VIDEO_EXTENSIONS:
@@ -167,11 +199,11 @@ class Library:
             self._last_scan = time.monotonic()
 
     @staticmethod
-    def _match_group(relative: str, groups: dict[str, str]) -> str:
+    def _match_group(relative: str, groups: dict[str, tuple[str, int, Path]]) -> str:
         folded = Path(relative).as_posix().casefold()
         if folded in groups:
-            return groups[folded]
-        for torrent_path, name in groups.items():
+            return groups[folded][0]
+        for torrent_path, (name, _, _) in groups.items():
             if folded.endswith("/" + torrent_path) or torrent_path.endswith("/" + folded):
                 return name
         parts = Path(relative).parts
@@ -240,7 +272,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _stream(self, video_id: str, head_only: bool = False) -> None:
         video = self.server.library.get(video_id)
-        if video is None:
+        if video is None or video.path is None:
             self.send_error(HTTPStatus.NOT_FOUND)
             return
         size = video.size

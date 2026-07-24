@@ -30,7 +30,10 @@ class LanApi {
                                 torrent = item.optString("torrent", "未归组"),
                                 size = item.getLong("size"),
                                 mime = item.optString("mime", "video/*"),
-                                streamUrl = "$base${item.getString("stream_url")}"
+                                available = item.optBoolean("available", true),
+                                streamUrl = item.optString("stream_url")
+                                    .takeIf { it.isNotBlank() && it != "null" }
+                                    ?.let { "$base$it" }
                             )
                         )
                     }

@@ -6,7 +6,8 @@ data class VideoItem(
     val torrent: String,
     val size: Long,
     val mime: String,
-    val streamUrl: String
+    val available: Boolean,
+    val streamUrl: String?
 )
 
 sealed interface UiState {

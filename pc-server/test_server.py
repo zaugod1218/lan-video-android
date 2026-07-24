@@ -67,6 +67,18 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(len(videos), 1)
         self.assertEqual(videos[0]["torrent"], "Demo")
         self.assertEqual(videos[0]["name"], "clip.mp4")
+        self.assertTrue(videos[0]["available"])
+
+    def test_lists_torrent_video_when_data_is_missing(self):
+        root = Path(self.temp.name)
+        (root / "Demo" / "clip.mp4").unlink()
+        self.server.library.scan()
+        with self.request("/api/videos") as response:
+            videos = json.load(response)
+        self.assertEqual(len(videos), 1)
+        self.assertEqual(videos[0]["name"], "clip.mp4")
+        self.assertFalse(videos[0]["available"])
+        self.assertIsNone(videos[0]["stream_url"])
 
     def test_supports_byte_range(self):
         with self.request("/api/videos") as response:

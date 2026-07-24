@@ -161,16 +161,20 @@ private fun VideoRow(video: VideoItem, onClick: () -> Unit) {
     Row(
         Modifier.fillMaxWidth()
             .background(Card, RoundedCornerShape(14.dp))
-            .clickable(onClick = onClick)
+            .clickable(enabled = video.available, onClick = onClick)
             .padding(16.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Column(Modifier.weight(1f)) {
             Text(video.name, color = Color.White, style = MaterialTheme.typography.titleMedium)
             Text(video.torrent, color = Muted, style = MaterialTheme.typography.bodySmall)
-            Text(formatBytes(video.size), color = Mint, style = MaterialTheme.typography.labelMedium)
+            Text(
+                if (video.available) formatBytes(video.size) else "${formatBytes(video.size)} · 缺少视频数据",
+                color = if (video.available) Mint else Color(0xFFFFB74D),
+                style = MaterialTheme.typography.labelMedium
+            )
         }
-        Text("播放", color = Mint)
+        Text(if (video.available) "播放" else "未下载", color = if (video.available) Mint else Muted)
     }
 }
 
@@ -178,7 +182,8 @@ private fun VideoRow(video: VideoItem, onClick: () -> Unit) {
 @Composable
 private fun PlayerScreen(video: VideoItem, token: String, onBack: () -> Unit) {
     val context = LocalContext.current
-    val player = remember(video.streamUrl, token) {
+    val streamUrl = requireNotNull(video.streamUrl)
+    val player = remember(streamUrl, token) {
         val httpFactory = DefaultHttpDataSource.Factory().apply {
             if (token.isNotBlank()) {
                 setDefaultRequestProperties(mapOf("Authorization" to "Bearer $token"))
@@ -188,7 +193,7 @@ private fun PlayerScreen(video: VideoItem, token: String, onBack: () -> Unit) {
         ExoPlayer.Builder(context)
             .setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory))
             .build().apply {
-            val item = MediaItem.Builder().setUri(video.streamUrl).build()
+            val item = MediaItem.Builder().setUri(streamUrl).build()
             setMediaItem(item)
             prepare()
             playWhenReady = true

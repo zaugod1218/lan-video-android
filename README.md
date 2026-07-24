@@ -48,7 +48,8 @@ App 填写相同令牌。
 ## 当前能力
 
 - Android NSD/mDNS 自动发现，也支持手动填写服务器地址
-- 按 `.torrent` 元数据归组视频
+- 读取并显示 `.torrent` 内的视频清单，按种子名称归组
+- 视频数据尚未下载时显示“未下载”，数据存在时才允许播放
 - MP4、MKV、WebM、AVI、MOV、M2TS 等常见扩展名
 - HTTP Range 播放和进度条跳转
 - 可选 Bearer Token
