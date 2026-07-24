@@ -59,6 +59,8 @@ jobs:
 
       - name: Build Windows BitTorrent streaming engine
         shell: pwsh
+        env:
+          CGO_CFLAGS: "-std=gnu11 -O2 -g"
         run: |
           go install github.com/anacrolix/confluence@v1.16.0
           $goPath = go env GOPATH
