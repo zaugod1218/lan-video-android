@@ -6,6 +6,7 @@ import android.graphics.Color as AndroidColor
 import android.graphics.pdf.PdfRenderer
 import android.media.MediaMetadataRetriever
 import android.content.pm.ActivityInfo
+import android.content.res.Configuration
 import android.os.Build
 import android.os.Bundle
 import android.os.ParcelFileDescriptor
@@ -42,6 +43,9 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.lifecycleScope
 import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
+import androidx.media3.common.Player
+import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import kotlinx.coroutines.Dispatchers
@@ -294,11 +298,14 @@ class MainActivity : ComponentActivity() {
 
     @Composable
     private fun MediaPreview(item: LibraryItem, url: String, modifier: Modifier = Modifier) {
+        val context = LocalContext.current
+        val television = remember(context) { isTelevision(context.resources.configuration) }
         val preview by produceState(PreviewResult(), url, item.type) {
             value = withContext(Dispatchers.IO) {
                 PreviewResult(
                     bitmap = when (item.type) {
-                        LibraryType.VIDEO -> loadVideoFrame(url)
+                        // Extracting many remote frames at once can lock up low-memory TVs.
+                        LibraryType.VIDEO -> if (television) null else loadVideoFrame(url)
                         LibraryType.IMAGE -> loadNetworkBitmap(url, sampleSize = 2)
                         LibraryType.PDF -> null
                     },
@@ -356,13 +363,37 @@ class MainActivity : ComponentActivity() {
     ) {
         val context = LocalContext.current
         val activity = this@MainActivity
+        val television = remember(context) { isTelevision(context.resources.configuration) }
+        var playerError by remember(url) { mutableStateOf<String?>(null) }
+        var playerReady by remember(url) { mutableStateOf(false) }
         val player = remember(url) {
-            ExoPlayer.Builder(context).build().apply {
+            val renderersFactory = DefaultRenderersFactory(context)
+                .setEnableDecoderFallback(true)
+            ExoPlayer.Builder(context, renderersFactory).build().apply {
                 setMediaItem(MediaItem.fromUri(url))
                 prepare()
                 if (initialPositionMs > 0) seekTo(initialPositionMs)
                 playWhenReady = true
             }
+        }
+        DisposableEffect(player) {
+            val listener = object : Player.Listener {
+                override fun onPlaybackStateChanged(playbackState: Int) {
+                    playerReady = playbackState == Player.STATE_READY
+                }
+
+                override fun onPlayerError(error: PlaybackException) {
+                    playerError = when (error.errorCode) {
+                        PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED,
+                        PlaybackException.ERROR_CODE_DECODER_INIT_FAILED -> "电视不支持这个视频的编码格式"
+                        PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
+                        PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT -> "读取电脑视频失败，请检查网络和服务器"
+                        else -> "播放失败：${error.errorCodeName}"
+                    }
+                }
+            }
+            player.addListener(listener)
+            onDispose { player.removeListener(listener) }
         }
         LaunchedEffect(player) {
             while (true) {
@@ -371,7 +402,9 @@ class MainActivity : ComponentActivity() {
             }
         }
         DisposableEffect(player) {
-            activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+            if (!television) {
+                activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+            }
             WindowCompat.setDecorFitsSystemWindows(activity.window, false)
             WindowInsetsControllerCompat(activity.window, activity.window.decorView).apply {
                 hide(WindowInsetsCompat.Type.systemBars())
@@ -380,7 +413,9 @@ class MainActivity : ComponentActivity() {
             onDispose {
                 onProgress(player.currentPosition.coerceAtLeast(0L), player.duration.coerceAtLeast(0L))
                 player.release()
-                activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+                if (!television) {
+                    activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+                }
                 WindowCompat.setDecorFitsSystemWindows(activity.window, true)
                 WindowInsetsControllerCompat(activity.window, activity.window.decorView)
                     .show(WindowInsetsCompat.Type.systemBars())
@@ -397,6 +432,31 @@ class MainActivity : ComponentActivity() {
                 },
                 modifier = Modifier.fillMaxSize(),
             )
+            if (!playerReady && playerError == null) {
+                CircularProgressIndicator(
+                    color = Color.White,
+                    modifier = Modifier.align(Alignment.Center),
+                )
+            }
+            playerError?.let { message ->
+                Card(
+                    modifier = Modifier.align(Alignment.Center).padding(28.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xDD1F2937)),
+                ) {
+                    Column(
+                        Modifier.padding(24.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                    ) {
+                        Text(message, color = Color.White, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(12.dp))
+                        Button(onClick = {
+                            playerError = null
+                            player.prepare()
+                            player.play()
+                        }) { Text("重试") }
+                    }
+                }
+            }
             TextButton(
                 onClick = onBack,
                 modifier = Modifier.align(Alignment.TopStart).padding(12.dp),
@@ -553,6 +613,9 @@ class MainActivity : ComponentActivity() {
         bytes >= 1_048_576 -> "%.1f MB".format(bytes / 1_048_576.0)
         else -> "%.1f KB".format(bytes / 1024.0)
     }
+
+    private fun isTelevision(configuration: Configuration): Boolean =
+        configuration.uiMode and Configuration.UI_MODE_TYPE_MASK == Configuration.UI_MODE_TYPE_TELEVISION
 
     private fun playbackFraction(positionMs: Long, durationMs: Long): Float {
         if (durationMs <= 0) return 0f
